@@ -55,6 +55,13 @@ struct ShellTarget {
     block: String,
 }
 
+/// Check whether the given shell name matches the user's login shell ($SHELL).
+fn is_login_shell(name: &str) -> bool {
+    std::env::var("SHELL")
+        .map(|s| s.ends_with(&format!("/{}", name)))
+        .unwrap_or(false)
+}
+
 fn detect_shells(unsee_bin: &str) -> Vec<ShellTarget> {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
     let home = PathBuf::from(home);
@@ -62,8 +69,9 @@ fn detect_shells(unsee_bin: &str) -> Vec<ShellTarget> {
     let mut targets = Vec::new();
 
     // zsh: ~/.zshenv (loaded for all zsh sessions, even non-interactive)
+    // Only install if the config file already exists, or zsh is the login shell.
     let zshenv = home.join(".zshenv");
-    if zshenv.exists() || shell_available("zsh") {
+    if zshenv.exists() || is_login_shell("zsh") {
         targets.push(ShellTarget {
             name: "zsh",
             path: zshenv,
@@ -72,8 +80,9 @@ fn detect_shells(unsee_bin: &str) -> Vec<ShellTarget> {
     }
 
     // bash: ~/.bashrc (loaded for interactive sessions)
+    // Only install if the config file already exists, or bash is the login shell.
     let bashrc = home.join(".bashrc");
-    if bashrc.exists() || shell_available("bash") {
+    if bashrc.exists() || is_login_shell("bash") {
         targets.push(ShellTarget {
             name: "bash",
             path: bashrc,
@@ -82,8 +91,9 @@ fn detect_shells(unsee_bin: &str) -> Vec<ShellTarget> {
     }
 
     // fish: ~/.config/fish/config.fish
+    // Only install if the config file already exists, or fish is the login shell.
     let fish_config = home.join(".config/fish/config.fish");
-    if fish_config.exists() || shell_available("fish") {
+    if fish_config.exists() || is_login_shell("fish") {
         targets.push(ShellTarget {
             name: "fish",
             path: fish_config,
@@ -94,15 +104,6 @@ fn detect_shells(unsee_bin: &str) -> Vec<ShellTarget> {
     targets
 }
 
-fn shell_available(name: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(name)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
 
 fn install_to(target: &ShellTarget) -> Result<bool> {
     let existing = if target.path.exists() {
