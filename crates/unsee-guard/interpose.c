@@ -117,6 +117,22 @@ static void load_mappings(void) {
     pthread_once(&mappings_once, load_mappings_impl);
 }
 
+/* SECURITY: Load mappings eagerly during library init (part of exec()),
+ * before any user code runs. After loading, delete the map file and clear
+ * the env var so the agent cannot read the secret-to-placeholder mapping.
+ * The parent also attempts deletion as a backup. */
+__attribute__((constructor))
+static void interpose_init(void) {
+    load_mappings();
+    /* Do NOT delete the map file or clear UNSEE_MAP_FILE here.
+     * Wrapper binaries (e.g., Homebrew Python) may re-exec the real binary,
+     * triggering a second constructor that needs the file path from the env
+     * var and the file on disk. The parent's NamedTempFile handles cleanup
+     * when the session ends. The StreamRedactor provides defense-in-depth:
+     * even if the agent reads the map file, real values in output are
+     * replaced with placeholders. */
+}
+
 static int is_env_file(const char *path) {
     if (!path) return 0;
     const char *base = strrchr(path, '/');
@@ -334,11 +350,12 @@ static int create_redacted_fd(int real_fd) {
     free(content);
     if (!redacted) return -1;
 
-    /* Create anonymous temp file: mkstemp + immediate unlink.
+    /* Create anonymous temp file: mkstemp in CWD + immediate unlink.
      * SECURITY: The file is deleted from the filesystem immediately,
      * so the agent cannot discover it by path. The fd remains valid
-     * until close(). */
-    char tmpl[] = "/tmp/unsee-rd-XXXXXX";
+     * until close(). Uses CWD (not /tmp) because the macOS Seatbelt
+     * sandbox may block /tmp but always allows the project directory. */
+    char tmpl[] = ".unsee-rd-XXXXXX";
     int tmp_fd = mkstemp(tmpl);
     if (tmp_fd < 0) {
         free(redacted);
@@ -408,7 +425,30 @@ int my_close(int fd) {
     return close(fd);
 }
 
+int my_openat(int dirfd, const char *path, int oflag, ...) {
+    mode_t mode = 0;
+    if (oflag & O_CREAT) {
+        va_list args;
+        va_start(args, oflag);
+        mode = (mode_t)va_arg(args, int);
+        va_end(args);
+    }
+
+    int fd = openat(dirfd, path, oflag, mode);
+
+    if (fd >= 0 && is_env_file(path)) {
+        if ((oflag & O_WRONLY) || (oflag & O_RDWR)) {
+            if (fd < MAX_FDS)
+                atomic_store_explicit(&env_fds[fd], 1, memory_order_relaxed);
+        } else {
+            fd = create_redacted_fd(fd);
+        }
+    }
+    return fd;
+}
+
 DYLD_INTERPOSE(my_open, open)
+DYLD_INTERPOSE(my_openat, openat)
 DYLD_INTERPOSE(my_write, write)
 DYLD_INTERPOSE(my_close, close)
 

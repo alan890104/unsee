@@ -103,9 +103,13 @@ pub fn run(cmd: &[String]) -> Result<()> {
         tracing::info!("no secrets to protect, running command directly");
     }
 
-    // 3. Write TSV map file for interpose library
+    // 3. Write TSV map file for interpose library.
+    // SECURITY: Create in the project directory (CWD), not TMPDIR. The macOS
+    // Seatbelt sandbox allows CWD read+write but may block TMPDIR access for
+    // the child process. The interpose library's constructor must be able to
+    // fopen() this file during exec() to load the secret mappings.
     let tsv = mapping.to_tsv();
-    let map_file = tempfile::NamedTempFile::new()
+    let map_file = tempfile::NamedTempFile::new_in(dir)
         .context("creating map file")?;
     std::fs::write(map_file.path(), &tsv)
         .context("writing map file")?;
@@ -204,18 +208,12 @@ pub fn run(cmd: &[String]) -> Result<()> {
     let session = PtySession::spawn(cmd, &extra_env, sandbox.as_ref())
         .context("spawning child process")?;
 
-    // SECURITY: Delete the map file from the filesystem immediately after spawn.
-    // The interpose library in the child loaded the file during exec() (via its
-    // constructor/init function). After that, the file is no longer needed on disk.
-    // Without this, the LLM agent could `cat $UNSEE_MAP_FILE` and read all
-    // secret values directly, bypassing the redactor entirely.
-    //
-    // The parent still holds the NamedTempFile handle (keeps the inode alive on
-    // Unix even after unlink), but no process can open it by path anymore.
-    if let Err(e) = std::fs::remove_file(map_file.path()) {
-        // Non-fatal: file might already be gone, but log for awareness
-        tracing::warn!("failed to unlink map file: {}", e);
-    }
+    // SECURITY: The interpose library's constructor deletes the map file and
+    // clears UNSEE_MAP_FILE from the child's environment during exec(). This
+    // is the primary cleanup path. The NamedTempFile handle provides backup
+    // cleanup when dropped (e.g., if the child crashes before the constructor
+    // runs). We do NOT race with an early unlink here — the child needs the
+    // file to exist at exec() time so the constructor can load mappings.
 
     // 8b. On Linux, start the seccomp supervisor thread if we got a listener fd.
     // The supervisor intercepts openat() calls and allows trusted binaries
