@@ -58,6 +58,14 @@ fn remove_block(path: &PathBuf) -> Result<bool> {
     Ok(true)
 }
 
+fn is_homebrew_install() -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let path = exe.to_string_lossy();
+    path.contains("/Cellar/") || path.contains("/homebrew/")
+}
+
 pub fn run() -> Result<()> {
     let mut removed = Vec::new();
 
@@ -72,6 +80,19 @@ pub fn run() -> Result<()> {
     } else {
         for (name, path) in &removed {
             println!("Removed unsee wrappers from {} ({})", name, path.display());
+        }
+    }
+
+    if is_homebrew_install() {
+        println!("Uninstalling Homebrew package...");
+        let status = std::process::Command::new("brew")
+            .args(["uninstall", "unsee"])
+            .status()
+            .context("running brew uninstall")?;
+        if status.success() {
+            println!("Done. unsee has been fully removed.");
+        } else {
+            eprintln!("brew uninstall failed. Run `brew uninstall unsee` manually.");
         }
     }
 
