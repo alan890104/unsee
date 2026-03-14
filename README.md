@@ -12,13 +12,6 @@ Stop secrets from leaking into AI context windows — without changing your work
 [![macOS](https://img.shields.io/badge/macOS-supported-brightgreen?style=flat-square&logo=apple)](https://github.com/alan890104/unsee)
 [![Linux](https://img.shields.io/badge/Linux-supported-brightgreen?style=flat-square&logo=linux&logoColor=white)](https://github.com/alan890104/unsee)
 
-<br>
-
-<p>
-<code>.env</code> stays untouched — developers and apps see real values.<br>
-LLM agents see only placeholders like <code>unsee:a1b2c3d4e5f6h7i8</code>.
-</p>
-
 </div>
 
 ---
@@ -60,7 +53,8 @@ LLM agents see only placeholders like <code>unsee:a1b2c3d4e5f6h7i8</code>.
 ### Homebrew (recommended)
 
 ```bash
-brew install alan890104/tap/unsee
+brew tap alan890104/tap
+brew install unsee
 ```
 
 ### From source
