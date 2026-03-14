@@ -148,11 +148,17 @@ pub fn run(cmd: &[String]) -> Result<()> {
         );
     }
 
-    // Secret values are NOT injected as env vars. The app/framework reads
-    // .env files directly and decides its own loading priority (e.g. Vite:
-    // .env.mode.local > .env.mode > .env.local > .env). Shield only needs
-    // all values in the redactor to mask output, regardless of which file
-    // the framework ultimately uses.
+    // Inject real secret values as env vars so apps work normally.
+    // The interpose library redirects .env reads to redacted shadow content,
+    // so frameworks using dotenv (override=false by default) will use these
+    // env vars instead of re-reading .env files.
+    for (_path, vars) in &file_set.files {
+        for (name, value) in vars {
+            if !ignorelist.contains(name) {
+                extra_env.entry(name.clone()).or_insert_with(|| value.clone());
+            }
+        }
+    }
 
     // 6. Build kernel sandbox for credential file protection.
     // SECURITY: If the platform doesn't support sandboxing (e.g., old kernel,

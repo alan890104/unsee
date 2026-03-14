@@ -753,7 +753,7 @@ checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
 name = "unsee-cli"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -769,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "unsee-core"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "dotenvy",
  "hex",
@@ -786,7 +786,7 @@ dependencies = [
 
 [[package]]
 name = "unsee-guard"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "cc",
  "landlock",
@@ -799,7 +799,7 @@ dependencies = [
 
 [[package]]
 name = "unsee-pty"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "libc",
  "unsee-guard",
@@ -807,7 +807,7 @@ dependencies = [
 
 [[package]]
 name = "unsee-redact"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "zeroize",
 ]

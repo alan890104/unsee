@@ -86,6 +86,31 @@ static void load_mappings_impl(void) {
         num_mappings++;
     }
     fclose(f);
+
+    /* Sort mappings by real_value length descending.
+     * SECURITY: For read redaction (real→placeholder), longer real values
+     * must be matched first to prevent shorter substrings from matching
+     * prematurely. E.g., "secret123" must match before "secret". */
+    for (int i = 0; i < num_mappings - 1; i++) {
+        for (int j = i + 1; j < num_mappings; j++) {
+            if (mappings[j].rv_len > mappings[i].rv_len) {
+                char tmp_ph[256], tmp_rv[1024];
+                size_t tmp_ph_len, tmp_rv_len;
+                memcpy(tmp_ph, mappings[i].placeholder, sizeof(tmp_ph));
+                memcpy(tmp_rv, mappings[i].real_value, sizeof(tmp_rv));
+                tmp_ph_len = mappings[i].ph_len;
+                tmp_rv_len = mappings[i].rv_len;
+                memcpy(mappings[i].placeholder, mappings[j].placeholder, sizeof(tmp_ph));
+                memcpy(mappings[i].real_value, mappings[j].real_value, sizeof(tmp_rv));
+                mappings[i].ph_len = mappings[j].ph_len;
+                mappings[i].rv_len = mappings[j].rv_len;
+                memcpy(mappings[j].placeholder, tmp_ph, sizeof(tmp_ph));
+                memcpy(mappings[j].real_value, tmp_rv, sizeof(tmp_rv));
+                mappings[j].ph_len = tmp_ph_len;
+                mappings[j].rv_len = tmp_rv_len;
+            }
+        }
+    }
 }
 
 static void load_mappings(void) {
@@ -204,6 +229,136 @@ static char *fix_buffer(const void *buf, size_t count, size_t *out_count) {
     return current;
 }
 
+/* Replace all real_value occurrences with placeholder in buf (reverse of fix_buffer).
+ * Used for read interception: the agent reads .env → sees placeholders.
+ * Returns malloc'd buffer; caller must free. */
+static char *redact_buffer(const void *buf, size_t count, size_t *out_count) {
+    load_mappings();
+
+    char *str = malloc(count + 1);
+    if (!str) { *out_count = 0; return NULL; }
+    memcpy(str, buf, count);
+    str[count] = '\0';
+
+    if (num_mappings == 0) {
+        *out_count = count;
+        return str;
+    }
+
+    int found = 0;
+    for (int i = 0; i < num_mappings; i++) {
+        if (mappings[i].rv_len > 0 && strstr(str, mappings[i].real_value)) {
+            found = 1; break;
+        }
+    }
+    if (!found) {
+        *out_count = count;
+        return str;
+    }
+
+    /* Mappings are sorted by rv_len descending (done in load_mappings_impl),
+     * so longer real values are replaced before shorter substrings. */
+    char *current = str;
+    for (int i = 0; i < num_mappings; i++) {
+        if (mappings[i].rv_len == 0) continue;
+        size_t cur_len = strlen(current);
+        size_t max_replacements = cur_len / mappings[i].rv_len + 1;
+        size_t per_replacement = mappings[i].ph_len + 1;
+        if (per_replacement > 0 && max_replacements > SIZE_MAX / per_replacement) {
+            *out_count = strlen(current);
+            return current;
+        }
+        size_t expansion = max_replacements * per_replacement;
+        if (expansion > SIZE_MAX - cur_len - 1) {
+            *out_count = strlen(current);
+            return current;
+        }
+        size_t alloc = cur_len + expansion + 1;
+        if (alloc > MAX_BUF) continue;
+        if (alloc < 256) alloc = 256;
+        char *result = malloc(alloc);
+        if (!result) {
+            *out_count = strlen(current);
+            return current;
+        }
+        char *dst = result;
+        char *src = current;
+        char *pos;
+
+        while ((pos = strstr(src, mappings[i].real_value)) != NULL) {
+            size_t prefix_len = (size_t)(pos - src);
+            memcpy(dst, src, prefix_len);
+            dst += prefix_len;
+            memcpy(dst, mappings[i].placeholder, mappings[i].ph_len);
+            dst += mappings[i].ph_len;
+            src = pos + mappings[i].rv_len;
+        }
+        size_t remainder = strlen(src);
+        memcpy(dst, src, remainder);
+        dst[remainder] = '\0';
+
+        free(current);
+        current = result;
+    }
+
+    *out_count = strlen(current);
+    return current;
+}
+
+/* Create a redacted shadow fd from a real .env fd.
+ * Reads the file, replaces real values with placeholders, writes to
+ * an anonymous temp file (mkstemp + unlink), returns the new fd.
+ * The original fd is closed. On failure, returns -1 with errno set. */
+static int create_redacted_fd(int real_fd) {
+    load_mappings();
+    if (num_mappings == 0) return real_fd;
+
+    off_t size = lseek(real_fd, 0, SEEK_END);
+    if (size <= 0) return real_fd;
+    lseek(real_fd, 0, SEEK_SET);
+
+    char *content = malloc((size_t)size + 1);
+    if (!content) return real_fd;
+
+    ssize_t total = 0;
+    while (total < size) {
+        ssize_t n = read(real_fd, content + total, (size_t)(size - total));
+        if (n <= 0) break;
+        total += n;
+    }
+    content[total] = '\0';
+    close(real_fd);
+
+    size_t redacted_size;
+    char *redacted = redact_buffer(content, (size_t)total, &redacted_size);
+    free(content);
+    if (!redacted) return -1;
+
+    /* Create anonymous temp file: mkstemp + immediate unlink.
+     * SECURITY: The file is deleted from the filesystem immediately,
+     * so the agent cannot discover it by path. The fd remains valid
+     * until close(). */
+    char tmpl[] = "/tmp/unsee-rd-XXXXXX";
+    int tmp_fd = mkstemp(tmpl);
+    if (tmp_fd < 0) {
+        free(redacted);
+        errno = EIO;
+        return -1;
+    }
+    unlink(tmpl);
+
+    ssize_t written = 0;
+    while ((size_t)written < redacted_size) {
+        ssize_t n = write(tmp_fd, redacted + written, redacted_size - (size_t)written);
+        if (n <= 0) break;
+        written += n;
+    }
+    free(redacted);
+    lseek(tmp_fd, 0, SEEK_SET);
+
+    return tmp_fd;
+}
+
 /* ================================================================
  * macOS: DYLD_INSERT_LIBRARIES + __DATA,__interpose
  * ================================================================ */
@@ -220,9 +375,15 @@ int my_open(const char *path, int oflag, ...) {
 
     int fd = open(path, oflag, mode);
 
-    if (fd >= 0 && fd < MAX_FDS && is_env_file(path)) {
+    if (fd >= 0 && is_env_file(path)) {
         if ((oflag & O_WRONLY) || (oflag & O_RDWR)) {
-            atomic_store_explicit(&env_fds[fd], 1, memory_order_relaxed);
+            if (fd < MAX_FDS)
+                atomic_store_explicit(&env_fds[fd], 1, memory_order_relaxed);
+        } else {
+            /* Read-only open: return a shadow fd with redacted content.
+             * SECURITY: The agent (LLM) sees placeholders; the real .env
+             * on disk is never modified. Apps get real values via env vars. */
+            fd = create_redacted_fd(fd);
         }
     }
     return fd;
@@ -263,12 +424,21 @@ typedef int (*orig_openat_t)(int dirfd, const char *path, int oflag, ...);
 typedef ssize_t (*orig_write_t)(int fd, const void *buf, size_t count);
 typedef int (*orig_close_t)(int fd);
 
-static void track_open_fd(int fd, const char *path, int oflag) {
-    if (fd >= 0 && fd < MAX_FDS && is_env_file(path)) {
+/* Returns the (possibly replaced) fd. On Linux, read()/write()/close()
+ * inside this function resolve to our overrides, but that's safe:
+ * - write() passes through because the temp fd is not in env_fds
+ * - close() just clears env_fds (already 0) and calls original
+ * - read() is not overridden */
+static int track_open_fd(int fd, const char *path, int oflag) {
+    if (fd >= 0 && is_env_file(path)) {
         if ((oflag & O_WRONLY) || (oflag & O_RDWR)) {
-            atomic_store_explicit(&env_fds[fd], 1, memory_order_relaxed);
+            if (fd < MAX_FDS)
+                atomic_store_explicit(&env_fds[fd], 1, memory_order_relaxed);
+        } else {
+            fd = create_redacted_fd(fd);
         }
     }
+    return fd;
 }
 
 /* SECURITY: All dlsym() calls check for NULL. If the real symbol cannot
@@ -289,8 +459,7 @@ int open(const char *path, int oflag, ...) {
     }
 
     int fd = orig(path, oflag, mode);
-    track_open_fd(fd, path, oflag);
-    return fd;
+    return track_open_fd(fd, path, oflag);
 }
 
 int open64(const char *path, int oflag, ...) {
@@ -306,8 +475,7 @@ int open64(const char *path, int oflag, ...) {
     }
 
     int fd = orig(path, oflag, mode);
-    track_open_fd(fd, path, oflag);
-    return fd;
+    return track_open_fd(fd, path, oflag);
 }
 
 int openat(int dirfd, const char *path, int oflag, ...) {
@@ -323,8 +491,7 @@ int openat(int dirfd, const char *path, int oflag, ...) {
     }
 
     int fd = orig(dirfd, path, oflag, mode);
-    track_open_fd(fd, path, oflag);
-    return fd;
+    return track_open_fd(fd, path, oflag);
 }
 
 int openat64(int dirfd, const char *path, int oflag, ...) {
@@ -340,8 +507,7 @@ int openat64(int dirfd, const char *path, int oflag, ...) {
     }
 
     int fd = orig(dirfd, path, oflag, mode);
-    track_open_fd(fd, path, oflag);
-    return fd;
+    return track_open_fd(fd, path, oflag);
 }
 
 ssize_t write(int fd, const void *buf, size_t count) {
