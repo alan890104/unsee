@@ -1,0 +1,8 @@
+[package]
+name = "unsee-pty"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libc = { workspace = true }
+unsee-guard = { path = "../unsee-guard" }
