@@ -65,3 +65,19 @@ jobs:
           files: |
             unsee-*.tar.gz
             checksums.txt
+
+  update-homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger homebrew-tap update
+        run: |
+          gh api repos/alan890104/homebrew-tap/dispatches \
+            -f event_type=update-formula \
+            -f "client_payload[version]=${{ steps.version.outputs.version }}"
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
